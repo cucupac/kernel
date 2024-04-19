@@ -20,6 +20,8 @@ library ExecLib {
 
     event TryExecuteUnsuccessful(uint256 batchExecutionindex, bytes result);
 
+    // NOTE: this is the normal execute function, so there should be code pertainent to session keys
+    // NOTE:
     function execute(ExecMode execMode, bytes calldata executionCalldata)
         internal
         returns (bytes[] memory returnData)
@@ -79,6 +81,8 @@ library ExecLib {
         }
     }
 
+    // NOTE: this does the actual calling.
+    // NOTE: the validation probably happens somewhere else though (validateUserOp)
     function execute(address target, uint256 value, bytes calldata callData) internal returns (bytes memory result) {
         /// @solidity memory-safe-assembly
         assembly {

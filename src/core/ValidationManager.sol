@@ -65,6 +65,7 @@ abstract contract ValidationManager is EIP712, SelectorManager, HookManager, Exe
     error RootValidatorCannotBeRemoved();
 
     // erc7579 plugins
+    // NOTE: here, we can install our own validator.
     struct ValidationConfig {
         uint32 nonce; // 4 bytes
         IHook hook; // 20 bytes address(1) : hook not required, address(0) : validator not installed
@@ -217,29 +218,81 @@ abstract contract ValidationManager is EIP712, SelectorManager, HookManager, Exe
         bytes calldata validatorData,
         bytes calldata hookData
     ) internal {
+        // NOTE: vId
+        // EXAMPLE: if address is: 0xA463C7164A7A78320e974651472707b4E85d592D,
+        // vId = 0x01A463C7164A7A78320e974651472707b4E85d592D0000000000000000000000
+
         ValidationStorage storage state = _validationStorage();
+
+        // struct ValidationStorage {
+        //     ValidationId rootValidator;
+        //     uint32 currentNonce;
+        //     uint32 validNonceFrom;
+        //     mapping(ValidationId => ValidationConfig) validationConfig;
+        //     mapping(ValidationId => mapping(bytes4 => bool)) allowedSelectors;
+        //     // validation = validator | permission
+        //     // validator == 1 validator
+        //     // permission == 1 signer + N policies
+        //     mapping(PermissionId => PermissionConfig) permissionConfig;
+        // }
+
         if (state.validationConfig[vId].nonce == state.currentNonce) {
             // only increase currentNonce when vId's currentNonce is same
             unchecked {
                 state.currentNonce++;
             }
         }
+
+        // NOTE: if no hook, set to 1 (tells us it's at least installed)
+        // NOTE: if hook, use that
+        // NOTE: if it's 0, that means it's not installed
         if (config.hook == IHook(address(0))) {
             config.hook = IHook(address(1));
         }
         if (state.currentNonce != config.nonce || state.validationConfig[vId].nonce >= config.nonce) {
             revert InvalidNonce();
         }
+
+        // struct ValidationConfig {
+        //     uint32 nonce; // 4 bytes
+        //     IHook hook; // 20 bytes address(1) : hook not required, address(0) : validator not installed
+        // }
+
+        // NOTE: 1. ADD IT TO STATE SO IT CAN BE REFERENCED
+        // mapping(vId => ValidationConfig)
         state.validationConfig[vId] = config;
+
+        // NOTE: We know hook is nonzero, so install hook (has it's own installation process)
         if (config.hook != IHook(address(1))) {
             _installHook(config.hook, hookData);
         }
+
+        // NOTE: GET vType
+        // Result: extracts first byte, which is 01
         ValidationType vType = ValidatorLib.getType(vId);
+
+        // // --- Kernel validation types ---
+        // ValidationType constant VALIDATION_TYPE_ROOT = ValidationType.wrap(0x00);
+        // ValidationType constant VALIDATION_TYPE_VALIDATOR = ValidationType.wrap(0x01);
+        // ValidationType constant VALIDATION_TYPE_PERMISSION = ValidationType.wrap(0x02);
+
+        // QUESTION: didn't ours just hard code it to 01? it did.
+        // NOTE: I also found permissionToIdentifier though...
+
         if (vType == VALIDATION_TYPE_VALIDATOR) {
+            // NOTE: 2. Call onInstall on validator
+            // NOTE: it's my understanding that this is the same "validator module" thing as the rhinestone module kit
+            // QUESTION: so what is a IPolicy then, and how to we "route to it".
             IValidator validator = ValidatorLib.getValidator(vId);
             validator.onInstall(validatorData);
         } else if (vType == VALIDATION_TYPE_PERMISSION) {
-            PermissionId permission = ValidatorLib.getPermissionId(vId);
+            // FIXME: that's great, but i don't think this will ever execute, as 01 mandatade in install module
+            // ANSWER: it gets here through install Validations
+            // TODO: trace how this vId gets here.
+            // bytes4 is permissionId
+            PermissionId permission = ValidatorLib.getPermissionId(vId); // bytes4
+            // NOTE: 3. Install permission
+            // NOTE: validatorData is hardly populated at this point -- it's just bytes
             _installPermission(permission, validatorData);
         } else {
             revert InvalidValidationType();
@@ -247,7 +300,23 @@ abstract contract ValidationManager is EIP712, SelectorManager, HookManager, Exe
     }
 
     function _installPermission(PermissionId permission, bytes calldata data) internal {
+        // bytes4 permission, data
+        // data bytes
+
         ValidationStorage storage state = _validationStorage();
+
+        // struct ValidationStorage {
+        //     ValidationId rootValidator;
+        //     uint32 currentNonce;
+        //     uint32 validNonceFrom;
+        //     mapping(ValidationId => ValidationConfig) validationConfig;
+        //     mapping(ValidationId => mapping(bytes4 => bool)) allowedSelectors;
+        //     // validation = validator | permission
+        //     // validator == 1 validator
+        //     // permission == 1 signer + N policies
+        //     mapping(PermissionId => PermissionConfig) permissionConfig;
+        // }
+
         bytes[] calldata permissionEnableData;
         assembly {
             permissionEnableData.offset := add(add(data.offset, 32), calldataload(data.offset))
@@ -259,14 +328,20 @@ abstract contract ValidationManager is EIP712, SelectorManager, HookManager, Exe
         }
 
         // clean up the policyData
+        // NOTE: permission is bytes4 (id)
         if (state.permissionConfig[permission].policyData.length > 0) {
+            // NOTE: delete it if it's already present, cuz we'll add new
             delete state.permissionConfig[permission].policyData;
         }
+
         unchecked {
             for (uint256 i = 0; i < permissionEnableData.length - 1; i++) {
+                // NOTE: push the first 22 bytes to policyData, which is an array of bytes32
                 state.permissionConfig[permission].policyData.push(
                     PolicyData.wrap(bytes22(permissionEnableData[i][0:22]))
                 );
+
+                // NOTE: installs policy on the policy contract, which was sent in
                 IPolicy(address(bytes20(permissionEnableData[i][2:22]))).onInstall(
                     abi.encodePacked(bytes32(PermissionId.unwrap(permission)), permissionEnableData[i][22:])
                 );
@@ -284,30 +359,60 @@ abstract contract ValidationManager is EIP712, SelectorManager, HookManager, Exe
         }
     }
 
+    // NOTE: I see op and userOpHash sent here.
+    // NOTE: I'm expecting to see contract with a validator contract somewhere.
+    // NOTE: The op and userOpHash will come from the entrypoint.
     function _doValidation(ValidationMode vMode, ValidationId vId, PackedUserOperation calldata op, bytes32 userOpHash)
         internal
         returns (ValidationData validationData)
     {
+        // NOTE: 1. Get validation state object
         ValidationStorage storage state = _validationStorage();
+
+        /* NOTE: This is what "state" is
+            struct ValidationStorage {
+                ValidationId rootValidator;
+                uint32 currentNonce;
+                uint32 validNonceFrom;
+                mapping(ValidationId => ValidationConfig) validationConfig;
+                mapping(ValidationId => mapping(bytes4 => bool)) allowedSelectors;
+                // validation = validator | permission
+                // validator == 1 validator
+                // permission == 1 signer + N policies
+                mapping(PermissionId => PermissionConfig) permissionConfig;   // QUESTION: is this related to session keys?
+            }
+        */
+
+        // NOTE: 2. Get user op
         PackedUserOperation memory userOp = op;
+
+        // NOTE: 3. Get signature from user op
         bytes calldata userOpSig = op.signature;
+
         unchecked {
+            // QUESTION: What's validation mode enable?
             if (vMode == VALIDATION_MODE_ENABLE) {
                 (validationData, userOpSig) = _enableMode(vId, op.signature);
                 userOp.signature = userOpSig;
             }
 
+            // NOTE: get vType from vId
             ValidationType vType = ValidatorLib.getType(vId);
             if (vType == VALIDATION_TYPE_VALIDATOR) {
+                // NOTE: So it looks like there is this "validator" concept, distict from permissions
                 validationData = _intersectValidationData(
                     validationData,
                     ValidationData.wrap(ValidatorLib.getValidator(vId).validateUserOp(userOp, userOpHash))
                 );
             } else {
+                // QUESTION: What's a permission? Is it related to session keys?
+                // NOTE: we get pId from vId
                 PermissionId pId = ValidatorLib.getPermissionId(vId);
                 if (PassFlag.unwrap(state.permissionConfig[pId].permissionFlag) & PassFlag.unwrap(SKIP_USEROP) != 0) {
                     revert PermissionNotAlllowedForUserOp();
                 }
+
+                // NOTE: sending that pId along with userOp (and sig); isn't sig already in userOp?
                 (ValidationData policyCheck, ISigner signer) = _checkUserOpPolicy(pId, userOp, userOpSig);
                 validationData = _intersectValidationData(validationData, policyCheck);
                 validationData = _intersectValidationData(
@@ -474,15 +579,56 @@ abstract contract ValidationManager is EIP712, SelectorManager, HookManager, Exe
         returns (ValidationData validationData, ISigner signer)
     {
         ValidationStorage storage state = _validationStorage();
+
+        // struct ValidationStorage {
+        //     ValidationId rootValidator;
+        //     uint32 currentNonce;
+        //     uint32 validNonceFrom;
+        //     mapping(ValidationId => ValidationConfig) validationConfig;
+        //     mapping(ValidationId => mapping(bytes4 => bool)) allowedSelectors;
+        //     // validation = validator | permission
+        //     // validator == 1 validator
+        //     // permission == 1 signer + N policies
+        //     mapping(PermissionId => PermissionConfig) permissionConfig;   // QUESTION: is this related to session keys?
+        // }
+
+        // struct PermissionConfig {
+        //     PassFlag permissionFlag;
+        //     ISigner signer;
+        //     PolicyData[] policyData;  // NOTE: this is just an array of bytes32 (includes a flag and a policy)
+        // }
+
         PolicyData[] storage policyData = state.permissionConfig[pId].policyData;
         unchecked {
+            // NOTE: looping through each bytes32 element in policyData
             for (uint256 i = 0; i < policyData.length; i++) {
+                // NOTE: extracting flag and policy from that bytes32 element
                 (PassFlag flag, IPolicy policy) = ValidatorLib.decodePolicyData(policyData[i]);
+
+                // interface IPolicy is IModule {
+                //     function checkUserOpPolicy(bytes32 id, PackedUserOperation calldata userOp) external payable returns (uint256);
+                //     function checkSignaturePolicy(bytes32 id, address sender, bytes32 hash, bytes calldata sig)
+                //         external
+                //         view
+                //         returns (uint256);
+                // }
+
+                // NOTE: the first byte of the userOpSig is the index
                 uint8 idx = uint8(bytes1(userOpSig[0]));
+
+                // NOTE: if the index from the passed-in sig is the iteration index...
+                //       we're looping through all of the iteration indexes.
+                //       this line if statement will be true if the the passed in sig matches (Why O(N) through?)
                 if (idx == i) {
                     // we are using uint64 length
+                    // NOTE: extract indexes 1 through 8.
                     uint256 length = uint64(bytes8(userOpSig[1:9]));
+
+                    // NOTE: extract signature which is 9 through (9 + length) - 1
+
                     userOp.signature = userOpSig[9:9 + length];
+
+                    // NOTE: extract 9 + length onwared -- userOpSig (distinct from userOp.signature)
                     userOpSig = userOpSig[9 + length:];
                 } else if (idx < i) {
                     // signature is not in order
@@ -490,6 +636,12 @@ abstract contract ValidationManager is EIP712, SelectorManager, HookManager, Exe
                 } else {
                     userOp.signature = "";
                 }
+
+                // NOTE: if iteration, i, is less than idx, userOp.sigature is empty
+                //       => there may be some iterations where the signature is empty
+                // NOTE: if iteration, i, is equal to idx, userOp.signature is the signature and userOpSig is the rest of the sig
+                // NOTE: if iteration, i, is greater than the idx, we revert
+
                 if (PassFlag.unwrap(flag) & PassFlag.unwrap(SKIP_USEROP) == 0) {
                     ValidationData vd =
                         ValidationData.wrap(policy.checkUserOpPolicy(bytes32(PermissionId.unwrap(pId)), userOp));

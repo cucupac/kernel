@@ -29,11 +29,21 @@ abstract contract ExecutorManager {
     }
 
     function _installExecutor(IExecutor executor, bytes calldata executorData, IHook hook) internal {
+        // NOTE: if there is no hook passed in, then we will set the hook to address(1)
+        // NOTE: if there is a hook passed, then we will set the hook to the passed hook
         if (address(hook) == address(0)) {
             hook = IHook(address(1));
         }
+
+        // NOTE: a struct with one value (hook)
         ExecutorConfig storage config = _executorConfig(executor);
+
+        // NOTE: 1. store executor in state
+        // QUESTION: where is this referenced for validation?
+        // ANSWER: in the kernel in the executeFromExecutor function
         config.hook = hook;
+
+        // NOTE: 2. call function to install on executor
         executor.onInstall(executorData);
     }
 

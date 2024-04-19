@@ -168,7 +168,8 @@ contract Kernel is IAccount, IAccountExecute, IERC7579Account, ValidationManager
         }
     }
 
-    // validation part
+    // NOTE: Only the entrypoint can call this
+
     function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
         external
         payable
@@ -184,16 +185,20 @@ contract Kernel is IAccount, IAccountExecute, IERC7579Account, ValidationManager
         // 3. In v2, only 1 plugin validator(aside from root validator) can access the selector.
         //    In v3, you can use more than 1 plugin to use the exact selector, you need to specify the validator address in userOp.nonce[2:22] to use the validator
 
+        // NOTE: It's extracting data from the nonce
+        // NOTE: mode, type, validation id
         (ValidationMode vMode, ValidationType vType, ValidationId vId) = ValidatorLib.decodeNonce(userOp.nonce);
         if (vType == VALIDATION_TYPE_ROOT) {
             vId = vs.rootValidator;
         }
         validationData = _doValidation(vMode, vId, userOp, userOpHash);
+
         ValidationConfig memory vc = vs.validationConfig[vId];
         // allow when nonce is not revoked or vType is sudo
         if (vType != VALIDATION_TYPE_ROOT && vc.nonce < vs.validNonceFrom) {
             revert InvalidNonce();
         }
+
         IHook execHook = vc.hook;
         if (address(execHook) == address(0)) {
             revert InvalidValidator();
@@ -251,6 +256,10 @@ contract Kernel is IAccount, IAccountExecute, IERC7579Account, ValidationManager
     {
         // no modifier needed, checking if msg.sender is registered executor will replace the modifier
         IHook hook = _executorConfig(IExecutor(msg.sender)).hook;
+
+        // NOTE: address(1) means it's installed with no hook
+        // NOTE: address(hook) means it's installed with a hook
+        // NOTE: address(0) means it's not installed => revert
         if (address(hook) == address(0)) {
             revert InvalidExecutor();
         }
@@ -297,10 +306,36 @@ contract Kernel is IAccount, IAccountExecute, IERC7579Account, ValidationManager
         onlyEntryPointOrSelfOrRoot
     {
         if (moduleType == MODULE_TYPE_VALIDATOR) {
+            // struct ValidationStorage {
+            //     ValidationId rootValidator;
+            //     uint32 currentNonce;
+            //     uint32 validNonceFrom;
+            //     mapping(ValidationId => ValidationConfig) validationConfig;
+            //     mapping(ValidationId => mapping(bytes4 => bool)) allowedSelectors;
+            //     // validation = validator | permission
+            //     // validator == 1 validator
+            //     // permission == 1 signer + N policies
+            //     mapping(PermissionId => PermissionConfig) permissionConfig;
+            // }
+
             ValidationStorage storage vs = _validationStorage();
+
+            // EXAMPLE: if address is: 0xA463C7164A7A78320e974651472707b4E85d592D,
+            // vId = 0x01A463C7164A7A78320e974651472707b4E85d592D0000000000000000000000
+
             ValidationId vId = ValidatorLib.validatorToIdentifier(IValidator(module));
+
+            // NOTE: Instantiations a hook contract: IHook(address(bytes20(initData[0:20])))
+            // NOTE: Init data: first 20 bytes is hook address
+            //       it can be address(0), in which case address(1) would get placed in ValidationConfig
             ValidationConfig memory config =
                 ValidationConfig({nonce: vs.currentNonce, hook: IHook(address(bytes20(initData[0:20])))});
+
+            // struct ValidationConfig {
+            //     uint32 nonce; // 4 bytes
+            //     IHook hook; // 20 bytes address(1) : hook not required, address(0) : validator not installed
+            // }
+
             bytes calldata validatorData;
             bytes calldata hookData;
             assembly {
@@ -340,6 +375,15 @@ contract Kernel is IAccount, IAccountExecute, IERC7579Account, ValidationManager
             // hook is expected to be paired with proper validator/executor/selector
             IHook(module).onInstall(initData);
         } else if (moduleType == MODULE_TYPE_POLICY) {
+            // TODO: look into installValidations()
+
+            // NOTE: not doing step 1.
+            // 1. you need to update some state in THIS smart account that reflects "yes, that god contract was installed"
+            // why? so that when the god contract tries to do things, this contract can reference that state
+
+            // 2. call a function on the module itself, called onInstall
+            // this simply initializes some stuff on the module
+
             // force call onInstall for policy
             // NOTE: for policy, kernel does not support independant policy install,
             // policy is expected to be paired with proper permissionId

@@ -102,6 +102,9 @@ library ValidatorLib {
     }
 
     function decodePolicyData(PolicyData data) internal pure returns (PassFlag flag, IPolicy policy) {
+        // PolicyData is bytes32
+
+        // 80 bits is 10 bytes, which leaves 22 bytes for the policy.
         assembly {
             flag := data
             policy := shr(80, data)
@@ -109,6 +112,24 @@ library ValidatorLib {
     }
 
     function validatorToIdentifier(IValidator validator) internal pure returns (ValidationId vId) {
+        // NOTE: 1. start out with 256 bits of 0 (with the 1 at the beginning)
+
+        // NOTE: 2. the address is 160 bits: shift it 88 bits to the left, which gets us 248.
+        // NOTE:    256 - 248 = 8 bits left over. There are 4 bits per hex value, and there are 2 hex values taken up.
+        // NOTE:    given that 01 are the first two hex values, we're looking at:
+        //          0x01<address> (22 hex values is 88 bits)
+
+        // EXAMPLE: if address is: 0xA463C7164A7A78320e974651472707b4E85d592D,
+
+        // 1. assign 0x01.... (256 bits)
+        // 2. shift the address 88 bits to the left:
+        //    00A463C7164A7A78320e974651472707b4E85d592D0000000000000000000000
+        // 3. merge the two togher
+        // vId = 0x01A463C7164A7A78320e974651472707b4E85d592D0000000000000000000000 (64 bytes)
+
+        // 4. type cast into ValidationId, which is 21 bytes (42 hex values) -- we subtract the 22 zeros at the end
+        //    0x01A463C7164A7A78320e974651472707b4E85d592D
+
         assembly {
             vId := 0x0100000000000000000000000000000000000000000000000000000000000000
             vId := or(vId, shl(88, validator))
@@ -116,6 +137,10 @@ library ValidatorLib {
     }
 
     function getType(ValidationId validator) internal pure returns (ValidationType vType) {
+        // EXAMPLE: if address is: 0xA463C7164A7A78320e974651472707b4E85d592D,
+        // validator = 0x01A463C7164A7A78320e974651472707b4E85d592D0000000000000000000000
+
+        // NOTE: this is extracting the first bytes1 value, 01 (assumes big endian)
         assembly {
             vType := validator
         }
@@ -127,13 +152,23 @@ library ValidatorLib {
         }
     }
 
+    // THE PERMISSION ID IS THE FIRST 4 BYTES OF THE ADDRESS (FIRST 8 HEX VALUES)
     function getPermissionId(ValidationId validator) internal pure returns (PermissionId id) {
+        // PermissionId is 4 bytes, so that's 8 hex values
+
+        // input: 0x02A463C7164A7A78320e974651472707b4E85d592D0000000000000000000000
+        // shift left: give example
+        // output: bytes4: id 0xa463c716
+
         assembly {
             id := shl(8, validator)
         }
     }
 
     function permissionToIdentifier(PermissionId permissionId) internal pure returns (ValidationId vId) {
+        // EXAMPLE: if address is: 0xA463C7164A7A78320e974651472707b4E85d592D,
+        // validator = 0x02A463C7164A7A78320e974651472707b4E85d592D0000000000000000000000
+
         assembly {
             vId := 0x0200000000000000000000000000000000000000000000000000000000000000
             vId := or(vId, shr(8, permissionId))
